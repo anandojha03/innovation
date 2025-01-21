@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import google.generativeai as genai
 import PIL.Image
 import json
-from typing import List
+from typing import List, Dict
 import io
 import os
 from pydantic import BaseModel
@@ -53,7 +53,34 @@ FIELDS2 = {
 class ComparisonResponse(BaseModel):
     response1: dict
     response2: dict
-    amounts_match: bool
+    comparison_result: dict
+
+def compare_responses(response1: Dict, response2: Dict) -> Dict:
+    """
+    Compare two response dictionaries and return a comparison result based on the specified conditions.
+    """
+    # Get common fields between the two responses
+    common_fields = set(response1.keys()) & set(response2.keys())
+    matching_fields = []
+    mismatched_fields = {}
+
+    # Compare each common field
+    for field in common_fields:
+        if response1[field] == response2[field]:
+            matching_fields.append(field)
+        else:
+            mismatched_fields[f"{field}1, {field}2"] = f"{response1[field]}, {response2[field]}"
+
+    # Determine the comparison status
+    if len(matching_fields) == len(common_fields):
+        return {"Status": "Complete Match"}
+    elif len(matching_fields) > 0:
+        return {
+            "Status": "Partial Match",
+            **mismatched_fields
+        }
+    else:
+        return {"Status": "Nothing Match"}
 
 async def process_image(image: PIL.Image.Image, fields: set, mapping: dict) -> dict:
     """Process a single image with Gemini AI."""
@@ -99,13 +126,13 @@ async def compare_documents(file1: UploadFile = File(...), file2: UploadFile = F
         response1 = await process_image(image1, FIELDS1, MAPPING_IMG1)
         response2 = await process_image(image2, FIELDS2, MAPPING_IMG2)
         
-        # Compare amounts
-        amounts_match = response1["amt_in_figures"] == response2["amt_in_figures"]
+        # Compare responses
+        comparison_result = compare_responses(response1, response2)
         
         return ComparisonResponse(
             response1=response1,
             response2=response2,
-            amounts_match=amounts_match
+            comparison_result=comparison_result
         )
         
     except Exception as e:
