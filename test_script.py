@@ -11,8 +11,8 @@ def test_document_comparison():
     TOTAL_TESTS = 5
     
     # Setup directories
-    form1_dir = Path("test_pages/form1")
-    form2_dir = Path("test_pages/form2")
+    form1_dir = Path("test_pages_jpg/form1")
+    form2_dir = Path("test_pages_jpg/form2")
     
     # Initialize results storage
     successful_matches = []
