@@ -7,6 +7,64 @@ from typing import List, Dict
 import io
 import os
 from pydantic import BaseModel
+import logging
+import os
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Configure logging
+def setup_logger():
+    # Create a logger
+    logger = logging.getLogger('document_comparison')
+    logger.setLevel(logging.INFO)
+
+    # Create formatters
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - RequestID: %(request_id)s - %(message)s'
+    )
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    # Create and configure file handler
+    file_handler = RotatingFileHandler(
+        f'logs/document_comparison.log',
+        maxBytes=10485760,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(file_formatter)
+
+    # Create and configure console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(console_formatter)
+
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
+
+logger = setup_logger()
 
 app = FastAPI()
 
@@ -84,7 +142,7 @@ def compare_responses(response1: Dict, response2: Dict) -> Dict:
 
 async def process_image(image: PIL.Image.Image, fields: set, mapping: dict) -> dict:
     """Process a single image with Gemini AI."""
-    prompt = f"Extract values of fields {fields} in json from the image and change their key names as {mapping}. Return type should be json only."
+    prompt = f"Extract values for the specified fields {fields} from the image in JSON format. Replace the key names as per {mapping}. For sponsor_bank and processing_bank, return only the bank name, excluding the prefix 'Authorised signatory from'. Output strictly in JSON format."
     try:
         response = model.generate_content(
             [prompt, image],
@@ -109,25 +167,41 @@ async def compare_documents(file1: UploadFile = File(...), file2: UploadFile = F
     Endpoint to compare two documents and extract information.
     Accepts JPEG, JPG, or PDF files.
     """
-    # Validate file types
-    validate_file_type(file1)
-    validate_file_type(file2)
+    # Generate a unique request ID
+    request_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_context = {'request_id': request_id}
+    
+    logger.info(f"Starting document comparison for files: {file1.filename} and {file2.filename}", extra=log_context)
     
     try:
+        # Validate file types
+        logger.info("Validating file types", extra=log_context)
+        validate_file_type(file1)
+        validate_file_type(file2)
+        
         # Read and process first image
+        logger.info(f"Processing first file: {file1.filename}", extra=log_context)
         image1_content = await file1.read()
         image1 = PIL.Image.open(io.BytesIO(image1_content))
         
         # Read and process second image
+        logger.info(f"Processing second file: {file2.filename}", extra=log_context)
         image2_content = await file2.read()
         image2 = PIL.Image.open(io.BytesIO(image2_content))
         
         # Process both images
+        logger.info("Processing images with Gemini", extra=log_context)
         response1 = await process_image(image1, FIELDS1, MAPPING_IMG1)
         response2 = await process_image(image2, FIELDS2, MAPPING_IMG2)
         
         # Compare responses
+        logger.info("Comparing processed results", extra=log_context)
         comparison_result = compare_responses(response1, response2)
+        
+        logger.info(
+            f"Comparison completed. Status: {comparison_result.get('Status', 'Unknown')}",
+            extra=log_context
+        )
         
         return ComparisonResponse(
             response1=response1,
@@ -136,8 +210,12 @@ async def compare_documents(file1: UploadFile = File(...), file2: UploadFile = F
         )
         
     except Exception as e:
+        logger.error(
+            f"Error during document comparison: {str(e)}",
+            exc_info=True,
+            extra=log_context
+        )
         raise HTTPException(status_code=500, detail=str(e))
-
 # Optional: Add a health check endpoint
 @app.get("/health")
 async def health_check():
