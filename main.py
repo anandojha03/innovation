@@ -69,7 +69,7 @@ logger = setup_logger()
 app = FastAPI()
 
 # Configure Gemini AI
-genai.configure(api_key="AIzaSyDv-v0xPb2IC4oExloK9a-CjAIMpL07TLc")
+genai.configure(api_key="AIzaSyAVlKdnQ7Lbv-tmHf6ADUKU0UJIWAQGyWY")
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Define mappings and fields as constants
