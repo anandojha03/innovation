@@ -109,30 +109,36 @@ class ComparisonResponse(BaseModel):
     response2: dict
     comparison_result: dict
 
+def get_overall_status(matching_fields, common_fields) -> str:
+    if len(matching_fields) == len(common_fields):
+        return "Complete Match"
+    elif len(matching_fields) > 0:
+        return "Partial Match"
+    else:
+        "Nothing Match"
+
 # Helper functions
 def compare_responses(response1: Dict, response2: Dict) -> Dict:
     """
     Compare two response dictionaries and return a comparison result based on the specified conditions.
     """
     common_fields = set(response1.keys()) & set(response2.keys())
-    matching_fields = []
+    matching_fields = {}
     mismatched_fields = {}
 
     for field in common_fields:
         if response1[field] == response2[field]:
-            matching_fields.append(field)
+            matching_fields[field] = [response1[field], response2[field]]
         else:
-            mismatched_fields[f"{field}1, {field}2"] = f"{response1[field]}, {response2[field]}"
+            mismatched_fields[field] = [response1[field], response2[field]]
 
-    if len(matching_fields) == len(common_fields):
-        return {"Status": "Complete Match"}
-    elif len(matching_fields) > 0:
-        return {
-            "Status": "Partial Match",
-            **mismatched_fields
-        }
-    else:
-        return {"Status": "Nothing Match"}
+    overall_status = get_overall_status(matching_fields, common_fields)
+
+    return {
+        "Status": overall_status,
+        "mismatched_fields": mismatched_fields,
+        "matching_fields": matching_fields
+    }
 
 async def process_image(image: PIL.Image.Image, fields: set, mapping: dict) -> dict:
     """Process a single image with Gemini AI."""
@@ -167,6 +173,7 @@ async def compare_documents(request: CompareRequest):
     Endpoint to compare two documents and extract information.
     Accepts base64-encoded image data.
     """
+
     # Generate a unique request ID
     request_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     log_context = {'request_id': request_id}
