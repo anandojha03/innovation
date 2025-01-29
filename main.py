@@ -11,7 +11,8 @@ import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from fastapi.middleware.cors import CORSMiddleware
-import os  # Import the os module
+import os
+import asyncio  # Added missing import
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -27,7 +28,7 @@ app.add_middleware(
 )
 
 # Create logs directory if it doesn't exist
-os.makedirs('logs', exist_ok=True)  # This line requires the os module
+os.makedirs('logs', exist_ok=True)
 
 # Configure logging
 def setup_logger():
@@ -64,99 +65,193 @@ logger = setup_logger()
 genai.configure(api_key="AIzaSyATtiKUD9zPa_lFgoRiazgh-lFcuDGucJ8")
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Define mappings and fields as constants
+# Define field mappings for each image type
+EXPECTED_FIELDS = {
+    "user_name",
+    "user_id",
+    "bureau_name",
+    "amt_limit_in_figures",
+    "amt_limit_in_words",
+    "limit_frequency",
+    "period_commencing",
+    "period_ending",
+    "drawing_account_name",
+    "bsb",
+    "account_number",
+    "temporary_processing_limit_override"
+}
+
 MAPPING_IMG1 = {
     "Company name (User name)": "user_name",
-    "MEID": "user_id",
-    "Sponsor Bank": "sponsor_bank",
-    "Processing Bank": "processing_bank",
-    "Amount in Figures": "amt_in_figures",
-    "Amount in words": "amt_in_words"
+    "MFID": "user_id",
+    "Lodging party (Other Bank Bureau name)": "bureau_name",
+    "Maximum total value of entries per processing cycle (Non Cumulative - not including charges)": "amt_limit_in_figures",
+    "Amount in words": "amt_limit_in_words",
+    "Processing cycle covering maximum peak value": "limit_frequency",
+    "Date": "period_commencing",
+    "Period ending": "period_ending",
+    "Name of Account to be debited for payments": "drawing_account_name",
+    "BSB no.": "bsb",
+    "Account no.": "account_number",
+    "Temporary processing limit override": "temporary_processing_limit_override"
 }
 
 MAPPING_IMG2 = {
-    "DE user name": "user_name",
-    "DE user ID": "user_id",
-    "Amount in Figures": "amt_in_figures",
-    "Amount in words": "amt_in_words",
-    "TNA prepared by": "sponsor_bank",
-    "TNA approved by": "processing_bank",
+    "User name": "user_name",
+    "User ID number": "user_id",
+    "Bureau name": "bureau_name",
+    "Processing limit": "amt_limit_in_figures",
+    "Processing limit under letter-container div": "amt_limit_in_words",
+    "Limit frequency": "limit_frequency",
+    "Date inside letter-container div": "period_commencing",
+    "Period ending": "period_ending",
+    "Account nominated for drawings": "drawing_account_name",
+    "BSB Number": "bsb",
+    "Account Number": "account_number"
 }
 
-FIELDS1 = {
-    "Company name (User name)",
-    "MEID",
-    "Sponsor Bank",
-    "Processing Bank",
-    "Amount in Figures",
-    "Amount in words"
+MAPPING_IMG3 = {
+    "DE User Name": "user_name",
+    "DE User ID": "user_id",
+    "Via Bureau": "bureau_name",
+    "Processing limit amount in brackets": "amt_limit_in_figures",
+    "Processing limit amount": "amt_limit_in_words",
+    "Limit frequency": "limit_frequency",
+    "Period commencing": "period_commencing",
+    "Period ending": "period_ending",
+    "Drawing account name": "drawing_account_name",
+    "BSB": "bsb",
+    "Account number": "account_number",
+    "Temporary processing limit override": "temporary_processing_limit_override"
 }
 
-FIELDS2 = {
-    "DE user name",
-    "DE user ID",
-    "TNA prepared by",
-    "TNA approved by",
-    "Processing amount limit that will contain in words and number both"
-}
-
-# Pydantic models for request and response
+# Pydantic models
 class CompareRequest(BaseModel):
     captures: List[str]  # List of base64-encoded images
 
 class ComparisonResponse(BaseModel):
     response1: dict
     response2: dict
+    response3: dict
     comparison_result: dict
 
-def get_overall_status(matching_fields, common_fields) -> str:
-    if len(matching_fields) == len(common_fields):
+def get_overall_status(matching_count: int, total_fields: int) -> str:
+    """Determine the overall match status based on matching field count."""
+    if matching_count == total_fields:
         return "Complete Match"
-    elif len(matching_fields) > 0:
+    elif matching_count > 0:
         return "Partial Match"
-    else:
-        "Nothing Match"
+    return "No Match"
 
-# Helper functions
-def compare_responses(response1: Dict, response2: Dict) -> Dict:
+def normalize_value(value: str) -> str:
     """
-    Compare two response dictionaries and return a comparison result based on the specified conditions.
+    Normalize values by removing special characters and standardizing format.
     """
-    common_fields = set(response1.keys()) & set(response2.keys())
+    if not isinstance(value, str):
+        value = str(value)
+    
+    # Remove special characters, spaces, and convert to lowercase
+    normalized = ''.join(char for char in value if char.isalnum()).lower()
+    
+    return normalized
+
+def values_match(value1: str, value2: str) -> bool:
+    """
+    Compare two values after normalization.
+    """
+    return normalize_value(value1) == normalize_value(value2)
+
+# Update the compare_responses function
+def compare_responses(responses: List[Dict]) -> Dict:
+    """
+    Compare multiple response dictionaries and return a detailed comparison result.
+    Uses normalized values for comparison.
+    """
+    common_fields = EXPECTED_FIELDS
     matching_fields = {}
     mismatched_fields = {}
 
     for field in common_fields:
-        if response1[field] == response2[field]:
-            matching_fields[field] = [response1[field], response2[field]]
-        else:
-            mismatched_fields[field] = [response1[field], response2[field]]
+        # Collect all available values for this field
+        values = [
+            response.get(field) for response in responses 
+            if field in response and response.get(field) is not None
+        ]
+        
+        if not values:
+            continue
 
-    overall_status = get_overall_status(matching_fields, common_fields)
+        # Check if all normalized values are identical
+        normalized_values = [normalize_value(value) for value in values]
+        if all(norm_val == normalized_values[0] for norm_val in normalized_values):
+            matching_fields[field] = values[0]  # Keep the original non-normalized value
+        else:
+            mismatched_fields[field] = values
+
+    overall_status = get_overall_status(len(matching_fields), len(common_fields))
 
     return {
-        "Status": overall_status,
+        "status": overall_status,
+        "matching_fields": matching_fields,
         "mismatched_fields": mismatched_fields,
-        "matching_fields": matching_fields
+        "normalized_matches": {
+            field: {
+                "original_values": values,
+                "normalized_value": normalize_value(values[0])
+            }
+            for field, values in matching_fields.items()
+        }
     }
 
-async def process_image(image: PIL.Image.Image, fields: set, mapping: dict) -> dict:
-    """Process a single image with Gemini AI."""
-    prompt = (
-        f"Extract values for the specified fields {fields} from the image in JSON format. "
-        f"Replace the key names as per {mapping}. "
-        "For sponsor_bank and processing_bank, return only the bank name, excluding the prefix 'Authorised signatory from'. "
-        "For amt_in_words, return only the amount in words (e.g., 'TEN MILLION') without any additional text or symbols. "
-        "Output strictly in JSON format."
-    )
+async def process_image(image: PIL.Image.Image, image_type: int) -> dict:
+    """Process a single image with Gemini AI using specific mapping."""
+    mapping = {
+        1: MAPPING_IMG1,
+        2: MAPPING_IMG2,
+        3: MAPPING_IMG3
+    }[image_type]
+
+    prompt = f"""
+    Extract information from this image using the following guidelines:
+    
+    1. Extract values for all visible fields and map them according to these rules: {mapping}
+    2. For amount fields:
+       - Remove any currency symbols or commas
+       - Keep only the numeric value for figures
+       - Keep only the words for word amounts
+    3. For dates:
+       - Return in DD/MM/YYYY format
+    4. For period_ending:
+       - If not explicitly mentioned, return "Until further notice"
+    5. For temporary_processing_limit_override:
+       - If not mentioned, return "none"
+    6. For limit_frequency:
+       - Return only the selected/ticked option
+    
+    Format the output as a strict JSON object with the mapped field names as keys.
+    Remove any prefixes, suffixes, or additional text from the extracted values.
+    Ensure all values are strings.
+    """
+
     try:
         response = model.generate_content(
             [prompt, image],
-            generation_config=genai.GenerationConfig(response_mime_type="application/json")
+            generation_config=genai.GenerationConfig(
+                temperature=0.1,
+                response_mime_type="application/json"
+            )
         )
-        return json.loads(response.text)
+        extracted_data = json.loads(response.text)
+        
+        # Apply default values for missing fields
+        if 'period_ending' not in extracted_data:
+            extracted_data['period_ending'] = "Until further notice"
+        if 'temporary_processing_limit_override' not in extracted_data:
+            extracted_data['temporary_processing_limit_override'] = "none"
+            
+        return extracted_data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image {image_type}: {str(e)}")
 
 def base64_to_image(base64_str: str) -> PIL.Image.Image:
     """Convert a base64-encoded string to a PIL image."""
@@ -166,47 +261,42 @@ def base64_to_image(base64_str: str) -> PIL.Image.Image:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
 
-# Endpoint to compare documents
 @app.post("/compare_documents/", response_model=ComparisonResponse)
 async def compare_documents(request: CompareRequest):
     """
-    Endpoint to compare two documents and extract information.
-    Accepts base64-encoded image data.
+    Endpoint to compare three documents and extract information.
+    Accepts three base64-encoded images.
     """
-
-    # Generate a unique request ID
     request_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     log_context = {'request_id': request_id}
 
     logger.info("Starting document comparison", extra=log_context)
 
     try:
-        # Ensure exactly two images are provided
-        if len(request.captures) != 2:
-            raise HTTPException(status_code=400, detail="Exactly two images are required for comparison.")
+        if len(request.captures) != 3:
+            raise HTTPException(status_code=400, detail="Exactly three images are required for comparison.")
 
-        # Convert base64 strings to PIL images
         logger.info("Converting base64 images to PIL images", extra=log_context)
-        image1 = base64_to_image(request.captures[0])
-        image2 = base64_to_image(request.captures[1])
+        images = [base64_to_image(capture) for capture in request.captures]
 
-        # Process both images
         logger.info("Processing images with Gemini", extra=log_context)
-        response1 = await process_image(image1, FIELDS1, MAPPING_IMG1)
-        response2 = await process_image(image2, FIELDS2, MAPPING_IMG2)
+        responses = await asyncio.gather(*[
+            process_image(img, idx + 1) for idx, img in enumerate(images)
+        ])
 
-        # Compare responses
-        logger.info("Comparing processed results", extra=log_context)
-        comparison_result = compare_responses(response1, response2)
+        comparison_result = compare_responses(responses)
+        print(f" here is the response which recived from gemini " , responses)
 
         logger.info(
-            f"Comparison completed. Status: {comparison_result.get('Status', 'Unknown')}",
+            f"Comparison completed. Status: {comparison_result.get('status', 'Unknown')}",
             extra=log_context
         )
 
+
         return ComparisonResponse(
-            response1=response1,
-            response2=response2,
+            response1=responses[0],
+            response2=responses[1],
+            response3=responses[2],
             comparison_result=comparison_result
         )
 
@@ -225,7 +315,6 @@ async def compare_documents(request: CompareRequest):
         )
         raise HTTPException(status_code=500, detail=str(e))
 
-# Health check endpoint
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
