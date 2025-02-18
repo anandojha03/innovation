@@ -12,7 +12,8 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from fastapi.middleware.cors import CORSMiddleware
 import os
-import asyncio  # Added missing import
+import asyncio  
+from typing import Optional
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -62,24 +63,39 @@ def setup_logger():
 logger = setup_logger()
 
 # Configure Gemini AI
-genai.configure(api_key="AIzaSyATtiKUD9zPa_lFgoRiazgh-lFcuDGucJ8")
+genai.configure(api_key="AIzaSyCgjshow09gS-O6g0k4P6fOl9zJmR0TXkU")
+# alternate
+# genai.configure(api_key="AIzaSyDv-v0xPb2IC4oExloK9a-CjAIMpL07TLc")
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Define field mappings for each image type
 EXPECTED_FIELDS = {
-    "user_name",
-    "user_id",
-    "bureau_name",
-    "amt_limit_in_figures",
-    "amt_limit_in_words",
-    "limit_frequency",
-    "period_commencing",
-    "period_ending",
-    "drawing_account_name",
-    "bsb",
-    "account_number",
-    "temporary_processing_limit_override"
+    "user_name": "Company Name",
+    "user_id": "MFID",
+    "bureau_name": "Bank Bureau Name",
+    "amt_limit_in_figures": "Amount Limit in Figures",
+    "amt_limit_in_words": "Amount Limit in Words",
+    "limit_frequency": "Limit Frequency",
+    "period_ending": "Period Ending",
+    "drawing_account_name": "Drawing Account Name",
+    "bsb": "BSB Number",
+    "account_number": "Account Number",
+    "temporary_processing_limit_override": "Temporary Processing Limit Override"
 }
+
+UI_FIELDS = [
+    "Company Name",
+    "MFID",
+    "Bank Bureau Name",
+    "Amount Limit in Figures",
+    "Amount Limit in Words",
+    "Limit Frequency",
+    "Period Ending",
+    "Drawing Account Name",
+    "BSB Number",
+    "Account Number",
+    "Temporary Processing Limit Override"
+]
 
 MAPPING_IMG1 = {
     "Company name (User name)": "user_name",
@@ -88,7 +104,6 @@ MAPPING_IMG1 = {
     "Maximum total value of entries per processing cycle (Non Cumulative - not including charges)": "amt_limit_in_figures",
     "Amount in words": "amt_limit_in_words",
     "Processing cycle covering maximum peak value": "limit_frequency",
-    "Date": "period_commencing",
     "Period ending": "period_ending",
     "Name of Account to be debited for payments": "drawing_account_name",
     "BSB no.": "bsb",
@@ -103,7 +118,6 @@ MAPPING_IMG2 = {
     "Processing limit": "amt_limit_in_figures",
     "Processing limit under letter-container div": "amt_limit_in_words",
     "Limit frequency": "limit_frequency",
-    "Date inside letter-container div": "period_commencing",
     "Period ending": "period_ending",
     "Account nominated for drawings": "drawing_account_name",
     "BSB Number": "bsb",
@@ -117,7 +131,6 @@ MAPPING_IMG3 = {
     "Processing limit amount in brackets": "amt_limit_in_figures",
     "Processing limit amount": "amt_limit_in_words",
     "Limit frequency": "limit_frequency",
-    "Period commencing": "period_commencing",
     "Period ending": "period_ending",
     "Drawing account name": "drawing_account_name",
     "BSB": "bsb",
@@ -170,8 +183,9 @@ def compare_responses(responses: List[Dict]) -> Dict:
     common_fields = EXPECTED_FIELDS
     matching_fields = {}
     mismatched_fields = {}
+    i = 0;
 
-    for field in common_fields:
+    for field, ui in common_fields.items():
         # Collect all available values for this field
         values = [
             response.get(field) for response in responses 
@@ -184,9 +198,11 @@ def compare_responses(responses: List[Dict]) -> Dict:
         # Check if all normalized values are identical
         normalized_values = [normalize_value(value) for value in values]
         if all(norm_val == normalized_values[0] for norm_val in normalized_values):
-            matching_fields[field] = values[0]  # Keep the original non-normalized value
+            matching_fields[ui] = values[0]  # Keep the original non-normalized value
         else:
-            mismatched_fields[field] = values
+            mismatched_fields[ui] = values
+
+        i = i+1
 
     overall_status = get_overall_status(len(matching_fields), len(common_fields))
 
@@ -314,6 +330,80 @@ async def compare_documents(request: CompareRequest):
             extra=log_context
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+# form filler backend
+
+
+class FormExtractionRequest(BaseModel):
+    image: str  # Base64 encoded image string
+
+class FormFields(BaseModel):
+    user_name: Optional[str] = None
+    user_id: Optional[str] = None
+    bureau_name: Optional[str] = None
+    amt_limit_in_figures: Optional[str] = None
+    amt_limit_in_words: Optional[str] = None
+    limit_frequency: Optional[str] = None
+    period_ending: Optional[str] = None
+    drawing_account_name: Optional[str] = None
+    bsb: Optional[str] = None
+    account_number: Optional[str] = None
+    temporary_processing_limit_override: Optional[str] = None
+
+def clean_base64(data: str) -> str:
+    """Handle data URI prefix if present"""
+    if data.startswith("data:image"):
+        return data.split(",", 1)[1]
+    return data
+
+@app.post("/extract-form", response_model=FormFields)
+async def extract_form(data: FormExtractionRequest):
+    try:
+        # Clean and decode base64
+        cleaned_base64 = clean_base64(data.image)
+        image_bytes = base64.b64decode(cleaned_base64)
+        
+        # Verify image validity
+        image = PIL.Image.open(io.BytesIO(image_bytes))
+        image.verify()  # Check if image is valid
+        
+        # Reopen for actual processing
+        image = PIL.Image.open(io.BytesIO(image_bytes))
+
+        # Create structured prompt
+        prompt = f"""Analyze this financial document image and extract these fields:
+        {json.dumps({v: f"from '{k}'" for k, v in MAPPING_IMG1.items()}, indent=4)}
+
+        Rules:
+        1. Return valid JSON ONLY
+        2. Use field names: {list(MAPPING_IMG1.values())}
+        3. Preserve original formatting
+        4. Return null for missing fields
+        5. Handle dates as strings in original format
+        6. Currency values should include symbols
+        7. Same exact field names might not be present but contextually they can be same
+
+        JSON Output:"""
+
+        # Generate response
+        response = model.generate_content([prompt, image])
+        
+        # Extract JSON from response
+        response_text = response.text.strip()
+        json_str = response_text.split("{", 1)[-1].rsplit("}", 1)[0]
+        json_str = "{" + json_str + "}"
+        
+        extracted_data = json.loads(json_str)
+        return FormFields(**extracted_data)
+
+    except (base64.binascii.Error, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, 
+                          detail=f"Failed to parse Gemini response: {str(e)}. Response was: {response_text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/health")
 async def health_check():
